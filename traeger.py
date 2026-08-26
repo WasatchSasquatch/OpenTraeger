@@ -102,6 +102,11 @@ def main():
             sys.exit(1)
         tn = get_thing(token)
         temp = int(sys.argv[2])
+        # Clear any previously-fired alarm state before setting new target.
+        # Once an alarm fires the grill sets probe_alarm_fired=1 and ignores
+        # further 14,{temp} commands until it receives 14,0 first.
+        send_command(tn, "14,0", token)
+        time.sleep(0.5)
         send_command(tn, f"14,{temp}", token)
         out({"ok": True, "probe_alarm": temp})
 
