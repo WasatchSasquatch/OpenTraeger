@@ -80,33 +80,84 @@ python traeger.py set-temp 375
 python traeger.py set-probe 160   # only if probe is connected
 ```
 
-**Step 4 — Start MQTT monitoring** (run in background, then Monitor the output):
+**Step 4 — Start the cook timer** (run in background, then Monitor the output):
 ```bash
-python mqtt_monitor.py \
-  --probe-alert 160 \
+python cook_timer.py \
+  --probe-target 160 \
   --flip-minutes 50 \
-  --grill-target 375
+  --poll-interval 60
 ```
-- `--probe-alert`: probe alarm temp (same as what you set on the grill)
-- `--flip-minutes`: comma-separated intervals, e.g. `45,45` means flip at 45 min, then again at 90 min
-- `--grill-target`: the grill set temp, for swing detection
+- `--probe-target`: the pull temp (probe alarm temp you set on the grill)
+- `--flip-minutes`: comma-separated intervals, e.g. `10,10` means flip at 10 min, then again at 20 min
+- `--poll-interval`: seconds between probe checks (default 60)
+
+Flip alerts fire from a real clock thread — they are not dependent on MQTT activity.
 
 ---
 
-## Reacting to Monitor Output
+## Active Cook Management
 
-Each line from `mqtt_monitor.py` starts with a type tag:
+Once a cook is running, `cook_timer.py` is your source of truth. Monitor its output and react to every line.
 
-| Tag | Action |
+### Output line reactions
+
+| Line | Action |
 |---|---|
-| `STATUS` | Every 5 minutes — check in with the user if desired |
-| `ALERT` `probe_reached` | **Send PushNotification**: "Your [food] is done! Pull it off the grill." + message in chat |
-| `ALERT` `flip_time` | **Send PushNotification**: "Time to flip your [food]!" + message in chat |
-| `ALERT` `grill_swing` | **Send PushNotification**: "Grill temp is off — check your pellets/lid." + message in chat |
-| `ALERT` `low_pellets` | **Send PushNotification**: "Pellets running low — refill soon." + message in chat |
-| `ERROR` | Tell the user immediately; suggest checking the grill's WiFi connection |
+| `FLIP` | **PushNotification** "Time to flip your [food]!" + message in chat |
+| `DONE` | **PushNotification** "Pull it off — probe hit [temp]°F!" + message in chat, then ask shutdown vs keep-warm |
+| `POLL` | Check probe and grill temps — if grill is more than 25°F off target, alert user |
+| `ERROR` | Tell the user; suggest checking grill WiFi |
 
-Always send a PushNotification for action-required alerts so the user gets pinged on their phone even when away from the terminal. Session linking ensures it reaches them on any device.
+Always send a PushNotification for FLIP and DONE so the user gets pinged on their phone.
+
+### Two-phase cooks (smoke → high heat)
+
+For cooks that start low-and-slow and finish hot (wings, ribs, chicken):
+
+**Phase 1:** Start cook_timer.py with `--probe-target <phase_threshold>` (e.g. 140°F for wings).
+```bash
+python cook_timer.py --probe-target 140
+```
+When `DONE` fires at the phase threshold:
+1. Run `python traeger.py set-temp <phase2_temp>`
+2. **PushNotification** "Crank to [temp]°F — add your sides now!"
+3. Kill the phase 1 timer process
+4. Start phase 2 timer immediately with flip schedule and final pull temp:
+```bash
+python cook_timer.py --probe-target 165 --flip-minutes 10
+```
+
+### Mid-cook check-ins
+
+If the user asks "how's it going?" or "what's the temp?", run:
+```bash
+python mqtt_monitor.py --one-shot
+```
+Report probe temp, grill temp, state, and estimated time remaining based on current climb rate.
+
+### End of cook
+
+When `DONE` fires:
+1. Send PushNotification to pull the food
+2. Message in chat with rest time recommendation
+3. Ask: "Want to shut the grill down or keep it warm?"
+4. Run the appropriate command:
+```bash
+python traeger.py shutdown      # cool-down cycle
+python traeger.py keep-warm on  # hold at low temp
+```
+
+### Grill swing detection
+
+During the `POLL` loop, if `grill_temp` is more than 25°F off the target:
+- Alert the user in chat
+- PushNotification if they might be away from the screen
+- Possible causes: lid opened, pellet jam, wind — ask the user to check
+
+### Low pellets
+
+If any status shows `pellet_level < 20`, send PushNotification immediately:
+"Pellets at [X]% — refill soon or the temp will drop."
 
 ---
 
